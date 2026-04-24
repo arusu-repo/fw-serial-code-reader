@@ -1,0 +1,831 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>シリアルコードリーダー</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        h1 {
+            width: 100%;
+            padding: 14px;
+            text-align: center;
+            background: #16213e;
+            font-size: 16px;
+            letter-spacing: 1px;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        /* Camera */
+        .camera-wrap {
+            position: relative;
+            width: 100%;
+            max-width: 480px;
+            margin-top: 12px;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            /* Fix aspect ratio so object-fit: cover is predictable */
+            aspect-ratio: 16 / 9;
+        }
+
+        #video {
+            width: 100%;
+            height: 100%;
+            display: block;
+            object-fit: cover;
+        }
+
+        .guide-box {
+            position: absolute;
+            /* Narrower, single-line focused: 75% wide × 20% tall, centered */
+            top: 40%;
+            left: 12.5%;
+            width: 75%;
+            height: 20%;
+            border: 2px solid #00d4ff;
+            border-radius: 4px;
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
+            pointer-events: none;
+        }
+
+        /* Corner accents */
+        .guide-box::before,
+        .guide-box::after {
+            content: '';
+            position: absolute;
+            width: 12px;
+            height: 12px;
+            border-color: #00d4ff;
+            border-style: solid;
+        }
+        .guide-box::before { top: -2px; left: -2px; border-width: 3px 0 0 3px; }
+        .guide-box::after  { bottom: -2px; right: -2px; border-width: 0 3px 3px 0; }
+
+        .guide-text {
+            position: absolute;
+            top: 36%;
+            width: 100%;
+            text-align: center;
+            font-size: 11px;
+            color: #00d4ff;
+            pointer-events: none;
+            text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+        }
+
+        /* Controls */
+        .controls {
+            width: 100%;
+            max-width: 480px;
+            padding: 12px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        #status {
+            text-align: center;
+            font-size: 13px;
+            color: #aaa;
+            min-height: 20px;
+            padding: 2px 0;
+        }
+
+        #btnCapture {
+            padding: 15px;
+            min-height: 52px;
+            font-size: 17px;
+            font-weight: bold;
+            background: #00d4ff;
+            color: #1a1a2e;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: opacity 0.2s, transform 0.1s;
+        }
+
+        #btnCapture:not(:disabled):active { transform: scale(0.97); }
+        #btnCapture:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        /* Result box */
+        #resultBox {
+            display: none;
+            background: #16213e;
+            border-radius: 10px;
+            padding: 14px;
+            border: 1px solid #0f3460;
+        }
+
+        #resultBox.show { display: block; }
+
+        .result-label {
+            font-size: 11px;
+            color: #888;
+            margin-bottom: 8px;
+        }
+
+        #snapshot {
+            width: 100%;
+            border-radius: 6px;
+            display: block;
+            margin-bottom: 12px;
+            border: 1px solid #0f3460;
+        }
+
+        /* 16-cell code input */
+        /*
+         * 1行 = 8セル + 内部gap(4px×3×2groups=24px) + row-gap(6px×2=12px) + 区切り文字(~18px) + padding(32px)
+         * 非セル幅合計 ≈ 86px → セル幅 = (100vw - 86px) / 8
+         */
+        :root {
+            --cell-w: clamp(28px, calc((100vw - 86px) / 8), 46px);
+        }
+        #codeInputs {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .code-row {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 6px;
+        }
+        .code-group {
+            display: flex;
+            gap: 4px;
+        }
+        .code-sep {
+            color: #445;
+            font-size: clamp(14px, calc(var(--cell-w) * 0.4), 18px);
+            font-weight: bold;
+            line-height: 1;
+            user-select: none;
+        }
+        .char-input {
+            width: var(--cell-w);
+            height: calc(var(--cell-w) * 1.17);
+            /* 16px以上でiOSの自動ズームを防止 */
+            font-size: clamp(16px, calc(var(--cell-w) * 0.5), 22px);
+            font-family: 'Courier New', monospace;
+            text-align: center;
+            text-transform: uppercase;
+            background: #0f3460;
+            color: #fff;
+            border: 2px solid #2a3a5c;
+            border-radius: 6px;
+            outline: none;
+            caret-color: transparent;
+            transition: border-color 0.15s, background 0.15s;
+        }
+        .char-input:focus {
+            border-color: #00d4ff;
+            background: #0d2d52;
+        }
+        .char-input.filled { border-color: #3a5a8c; }
+
+        #confidence {
+            font-size: 11px;
+            color: #666;
+            text-align: right;
+            margin-top: 4px;
+        }
+
+        .actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .actions button {
+            flex: 1;
+            padding: 12px;
+            font-size: 14px;
+            font-weight: bold;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        #btnSave  { background: #6c5ce7; color: #fff; }
+        #btnCopy  { background: #00b894; color: #fff; }
+        #btnReset { background: #e17055; color: #fff; }
+
+        /* History */
+        #historyBox {
+            display: none;
+            background: #16213e;
+            border-radius: 10px;
+            padding: 14px;
+            border: 1px solid #0f3460;
+        }
+        #historyBox.show { display: block; }
+
+        .history-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .history-header span {
+            font-size: 11px;
+            color: #888;
+        }
+        #btnCopyAll {
+            font-size: 12px;
+            font-weight: bold;
+            padding: 5px 10px;
+            background: #00b894;
+            color: #fff;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        #btnClearHistory {
+            font-size: 12px;
+            font-weight: bold;
+            padding: 5px 10px;
+            background: transparent;
+            color: #888;
+            border: 1px solid #444;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        #historyList {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .history-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: #0f3460;
+            border-radius: 6px;
+            padding: 8px 10px;
+            animation: fadeIn 0.3s ease;
+        }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
+
+        .history-code {
+            flex: 1;
+            font-family: 'Courier New', monospace;
+            font-size: 16px;
+            letter-spacing: 2px;
+            color: #fff;
+        }
+        .history-time {
+            font-size: 10px;
+            color: #555;
+            white-space: nowrap;
+        }
+        .btn-item-copy {
+            font-size: 11px;
+            padding: 4px 8px;
+            background: #00b894;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        /* Spinner */
+        .spinner {
+            display: inline-block;
+            width: 14px; height: 14px;
+            border: 2px solid #444;
+            border-top-color: #00d4ff;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            vertical-align: middle;
+            margin-right: 6px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        #btnContinuous {
+            padding: 15px;
+            min-height: 52px;
+            font-size: 17px;
+            font-weight: bold;
+            background: #0f3460;
+            color: #eee;
+            border: 2px solid #444;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.2s, border-color 0.2s, transform 0.1s;
+        }
+
+        #btnContinuous:not(:disabled):active { transform: scale(0.97); }
+        #btnContinuous.active {
+            background: #e17055;
+            border-color: #e17055;
+            color: #fff;
+        }
+
+        /* Guide box pulse in continuous mode */
+        .guide-box.scanning {
+            border-color: #f9ca24;
+            animation: pulse 1s ease-in-out infinite;
+        }
+        .guide-text.scanning { color: #f9ca24; }
+
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 0 9999px rgba(0,0,0,0.45), 0 0 0 0 rgba(249,202,36,0.6); }
+            50%       { box-shadow: 0 0 0 9999px rgba(0,0,0,0.45), 0 0 8px 4px rgba(249,202,36,0.4); }
+        }
+    </style>
+</head>
+<body>
+
+<h1>シリアルコードリーダー</h1>
+
+<div class="camera-wrap">
+    <video id="video" autoplay playsinline muted></video>
+    <div class="guide-box"></div>
+    <div class="guide-text">コードをここに合わせてください</div>
+</div>
+
+<canvas id="canvas" style="display:none"></canvas>
+
+<div class="controls">
+    <div id="status">カメラを起動中...</div>
+    <button id="btnCapture" disabled>撮影して読み取る</button>
+    <button id="btnContinuous" disabled>連続検知モード</button>
+
+    <div id="resultBox">
+        <div class="result-label">撮影画像</div>
+        <img id="snapshot" alt="撮影画像">
+        <div class="result-label">読み取り結果（各文字を直接編集できます）</div>
+        <div id="codeInputs">
+            <div class="code-row">
+                <div class="code-group">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                </div>
+                <span class="code-sep">—</span>
+                <div class="code-group">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                </div>
+            </div>
+            <div class="code-row">
+                <div class="code-group">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                </div>
+                <span class="code-sep">—</span>
+                <div class="code-group">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                    <input class="char-input" maxlength="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="characters" inputmode="text">
+                </div>
+            </div>
+        </div>
+        <div id="confidence"></div>
+        <div class="actions">
+            <button id="btnSave">保存</button>
+            <button id="btnCopy">コピー</button>
+            <button id="btnReset">再撮影</button>
+        </div>
+    </div>
+
+    <div id="historyBox">
+        <div class="history-header">
+            <span id="historyCount">0件検知</span>
+            <div style="display:flex;gap:6px">
+                <button id="btnCopyAll">全コピー</button>
+                <button id="btnClearHistory">クリア</button>
+            </div>
+        </div>
+        <div id="historyList"></div>
+    </div>
+</div>
+
+<script>
+const video       = document.getElementById('video');
+const canvas      = document.getElementById('canvas');
+const btnCapture  = document.getElementById('btnCapture');
+const statusEl    = document.getElementById('status');
+const resultBox   = document.getElementById('resultBox');
+const confEl      = document.getElementById('confidence');
+const btnCopy       = document.getElementById('btnCopy');
+const btnReset      = document.getElementById('btnReset');
+const snapshot      = document.getElementById('snapshot');
+const btnContinuous  = document.getElementById('btnContinuous');
+const guideBox       = document.querySelector('.guide-box');
+const guideText      = document.querySelector('.guide-text');
+const historyBox     = document.getElementById('historyBox');
+const historyList    = document.getElementById('historyList');
+const historyCount   = document.getElementById('historyCount');
+const btnSave        = document.getElementById('btnSave');
+const btnCopyAll     = document.getElementById('btnCopyAll');
+const btnClearHistory= document.getElementById('btnClearHistory');
+const charInputs     = Array.from(document.querySelectorAll('.char-input'));
+
+// ── Code cell helpers ─────────────────────────────────────────────────────────
+function getCode() {
+    return charInputs.map(c => c.value.toUpperCase()).join('');
+}
+
+function getFormattedCode() {
+    const code = getCode();
+    return code.length === 16 ? code.match(/.{4}/g).join(' ') : '';
+}
+
+function setCode(str) {
+    const chars = str.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 16);
+    charInputs.forEach((input, i) => {
+        input.value = chars[i] || '';
+        input.classList.toggle('filled', !!chars[i]);
+    });
+}
+
+function focusCell(index) {
+    const target = charInputs[Math.max(0, Math.min(15, index))];
+    target?.focus();
+    // select existing char so next keystroke replaces it
+    target?.select();
+}
+
+charInputs.forEach((input, i) => {
+    input.addEventListener('keydown', e => {
+        if (e.key === 'Backspace') {
+            if (input.value) {
+                input.value = '';
+                input.classList.remove('filled');
+            } else {
+                focusCell(i - 1);
+            }
+            e.preventDefault();
+        } else if (e.key === 'ArrowLeft')  { focusCell(i - 1); e.preventDefault(); }
+          else if (e.key === 'ArrowRight') { focusCell(i + 1); e.preventDefault(); }
+          else if (e.key === 'Delete')     { input.value = ''; input.classList.remove('filled'); e.preventDefault(); }
+    });
+
+    input.addEventListener('input', e => {
+        const val = e.target.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        input.value = val ? val.slice(-1) : '';
+        input.classList.toggle('filled', !!input.value);
+        if (input.value) focusCell(i + 1);
+    });
+
+    input.addEventListener('paste', e => {
+        e.preventDefault();
+        const pasted = (e.clipboardData || window.clipboardData).getData('text');
+        const chars = pasted.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+        chars.split('').forEach((c, j) => {
+            if (i + j < 16) {
+                charInputs[i + j].value = c;
+                charInputs[i + j].classList.add('filled');
+            }
+        });
+        focusCell(Math.min(i + chars.length, 15));
+    });
+});
+
+let continuousActive = false;
+const detectedCodes  = []; // { code, time }
+
+function addToHistory(code) {
+    // 直前と同じコードは追加しない
+    if (detectedCodes.length && detectedCodes[0].code === code) return;
+
+    const now = new Date();
+    const time = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+    detectedCodes.unshift({ code, time });
+
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    item.innerHTML = `
+        <span class="history-code">${code}</span>
+        <span class="history-time">${time}</span>
+        <button class="btn-item-copy">コピー</button>`;
+    item.querySelector('.btn-item-copy').addEventListener('click', async (e) => {
+        try {
+            await navigator.clipboard.writeText(code);
+            e.target.textContent = '✓';
+            setTimeout(() => { e.target.textContent = 'コピー'; }, 1500);
+        } catch { /* ignore */ }
+    });
+    historyList.prepend(item);
+
+    historyCount.textContent = `${detectedCodes.length}件検知`;
+    historyBox.classList.add('show');
+}
+const VOTE_BUFFER_SIZE = 5;
+const VOTE_THRESHOLD   = 3; // same code N times in buffer → confirmed
+const voteBuffer = [];
+
+// ── Camera ───────────────────────────────────────────────────────────────────
+async function startCamera() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+                facingMode: 'environment',
+                width:  { ideal: 1920 },
+                height: { ideal: 1080 },
+            }
+        });
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+            statusEl.textContent = 'コードを枠内に合わせて撮影ボタンを押してください';
+            btnCapture.disabled = false;
+            btnContinuous.disabled = false;
+        };
+    } catch {
+        statusEl.textContent = 'カメラへのアクセスが拒否されました。ブラウザの設定を確認してください';
+    }
+}
+
+// ── Image preprocessing: grayscale → sharpen → Otsu binarize ─────────────────
+function preprocess(ctx, w, h) {
+    const img = ctx.getImageData(0, 0, w, h);
+    const d   = img.data;
+
+    // Step 1: grayscale into temp array
+    const gray = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+        gray[i] = d[i*4] * 0.299 + d[i*4+1] * 0.587 + d[i*4+2] * 0.114;
+    }
+
+    // Step 2: 3×3 unsharp-mask sharpen on grayscale
+    const sharp = new Uint8Array(w * h);
+    const k = [0, -1, 0, -1, 5, -1, 0, -1, 0];
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            if (x === 0 || x === w-1 || y === 0 || y === h-1) {
+                sharp[y*w+x] = gray[y*w+x];
+                continue;
+            }
+            let v = 0;
+            for (let ky = -1; ky <= 1; ky++)
+                for (let kx = -1; kx <= 1; kx++)
+                    v += gray[(y+ky)*w+(x+kx)] * k[(ky+1)*3+(kx+1)];
+            sharp[y*w+x] = Math.min(255, Math.max(0, v));
+        }
+    }
+
+    // Step 3: Otsu's threshold
+    const hist = new Array(256).fill(0);
+    for (let i = 0; i < sharp.length; i++) hist[sharp[i]]++;
+    const total = sharp.length;
+    let sum = 0;
+    for (let i = 0; i < 256; i++) sum += i * hist[i];
+    let sumB = 0, wB = 0, maxVar = 0, threshold = 128;
+    for (let t = 0; t < 256; t++) {
+        wB += hist[t];
+        if (!wB) continue;
+        const wF = total - wB;
+        if (!wF) break;
+        sumB += t * hist[t];
+        const mB = sumB / wB, mF = (sum - sumB) / wF;
+        const v = wB * wF * (mB - mF) ** 2;
+        if (v > maxVar) { maxVar = v; threshold = t; }
+    }
+
+    // Step 4: write back as black/white
+    for (let i = 0; i < w * h; i++) {
+        const val = sharp[i] > threshold ? 255 : 0;
+        d[i*4] = d[i*4+1] = d[i*4+2] = val;
+        d[i*4+3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+}
+
+// ── Extract 16-char code from raw OCR output ──────────────────────────────────
+function extractCode(raw) {
+    const text = raw.toUpperCase();
+
+    // Pattern 1: 4 groups of 4 alphanumeric chars separated by whitespace/dash
+    const m1 = text.match(/[A-Z0-9]{4}[\s\-_]+[A-Z0-9]{4}[\s\-_]+[A-Z0-9]{4}[\s\-_]+[A-Z0-9]{4}/);
+    if (m1) return m1[0].replace(/[^A-Z0-9]/g, '');
+
+    // Pattern 2: any 16 consecutive alphanumeric characters
+    const stripped = text.replace(/[^A-Z0-9]/g, '');
+    const m2 = stripped.match(/[A-Z0-9]{16}/);
+    return m2 ? m2[0] : null;
+}
+
+// ── Crop guide-box area from video into canvas ────────────────────────────────
+// Guide box CSS: top 40%, left 12.5%, width 75%, height 20%
+// Because #video uses object-fit:cover inside a 16:9 container, the visible
+// portion of the video stream may be narrower or shorter than the full stream.
+// We calculate the offset so the crop matches what's actually shown on screen.
+function cropGuideBox(targetMinWidth = 1280) {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const el = video;
+    const dispW = el.clientWidth  || el.offsetWidth  || vw;
+    const dispH = el.clientHeight || el.offsetHeight || vh;
+
+    // object-fit: cover scale factor
+    const coverScale = Math.max(dispW / vw, dispH / vh);
+    // How many video pixels are hidden (cropped) on each side
+    const hiddenX = (vw - dispW / coverScale) / 2;
+    const hiddenY = (vh - dispH / coverScale) / 2;
+    // 1 CSS pixel = how many video pixels
+    const cssToVid = 1 / coverScale;
+
+    // Guide box in CSS %: left 12.5%, top 40%, width 75%, height 20%
+    const boxCssX = dispW * 0.125, boxCssY = dispH * 0.40;
+    const boxCssW = dispW * 0.75,  boxCssH = dispH * 0.20;
+
+    const cropX = Math.round(hiddenX + boxCssX * cssToVid);
+    const cropY = Math.round(hiddenY + boxCssY * cssToVid);
+    const cropW = Math.round(boxCssW * cssToVid);
+    const cropH = Math.round(boxCssH * cssToVid);
+
+    const scale = Math.max(0.5, Math.min(2, targetMinWidth / cropW));
+    const cw = Math.round(cropW * scale), ch = Math.round(cropH * scale);
+    canvas.width = cw; canvas.height = ch;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cw, ch);
+    return ctx;
+}
+
+// ── Capture & OCR ─────────────────────────────────────────────────────────────
+async function capture() {
+    btnCapture.disabled = true;
+    resultBox.classList.remove('show');
+    statusEl.innerHTML = '<span class="spinner"></span>解析中（数秒かかります）...';
+
+    const ctx = cropGuideBox(1600);
+    preprocess(ctx, canvas.width, canvas.height);
+    snapshot.src = canvas.toDataURL('image/jpeg', 0.85);
+
+    try {
+        const result = await Tesseract.recognize(canvas, 'eng', {
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -',
+            tessedit_pageseg_mode: '6',
+        });
+
+        console.log('[OCR raw]', result.data.text);
+
+        const code = extractCode(result.data.text);
+
+        if (code) {
+            setCode(code);
+            statusEl.textContent = '読み取り完了！内容を確認してください';
+            confEl.textContent   = `認識信頼度: ${Math.round(result.data.confidence)}%`;
+        } else {
+            setCode('');
+            statusEl.textContent = 'コードを検出できませんでした。枠内に合わせて再度お試しください';
+            confEl.textContent   = '';
+        }
+    } catch (e) {
+        statusEl.textContent = 'エラーが発生しました。再度お試しください';
+        console.error(e);
+    }
+
+    resultBox.classList.add('show');
+    btnCapture.disabled = false;
+}
+
+// ── Copy to clipboard ─────────────────────────────────────────────────────────
+btnCopy.addEventListener('click', async () => {
+    const val = getFormattedCode();
+    if (!val) return;
+    try {
+        await navigator.clipboard.writeText(val);
+        btnCopy.textContent = 'コピー済み ✓';
+        setTimeout(() => { btnCopy.textContent = 'コピー'; }, 2000);
+    } catch { /* ignore */ }
+});
+
+// ── Multi-frame voting ────────────────────────────────────────────────────────
+function vote(code) {
+    voteBuffer.push(code);
+    if (voteBuffer.length > VOTE_BUFFER_SIZE) voteBuffer.shift();
+    const counts = {};
+    for (const c of voteBuffer) counts[c] = (counts[c] || 0) + 1;
+    const [best, count] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+    return count >= VOTE_THRESHOLD ? best : null;
+}
+
+// ── Continuous detection ──────────────────────────────────────────────────────
+async function runContinuous() {
+    if (!continuousActive) return;
+
+    const ctx = cropGuideBox(1280);
+    preprocess(ctx, canvas.width, canvas.height);
+
+    try {
+        const result = await Tesseract.recognize(canvas, 'eng', {
+            tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -',
+            tessedit_pageseg_mode: '7',
+        });
+
+        if (!continuousActive) return;
+
+        const raw = extractCode(result.data.text);
+        const confirmed = raw ? vote(raw) : null;
+
+        if (confirmed) {
+            if (getCode() !== confirmed) {
+                setCode(confirmed);
+                confEl.textContent = `認識信頼度: ${Math.round(result.data.confidence)}%（${VOTE_THRESHOLD}フレーム一致）`;
+                resultBox.classList.add('show');
+                document.getElementById('codeInputs').animate([
+                    { opacity: 0.4 }, { opacity: 1 }
+                ], { duration: 400 });
+            }
+            statusEl.textContent = 'スキャン中...（検知済み）';
+        } else {
+            const pending = raw ? `候補: ${raw.match(/.{4}/g).join(' ')}` : '';
+            statusEl.innerHTML = `<span class="spinner"></span>スキャン中... ${pending}`;
+        }
+    } catch (e) {
+        console.error(e);
+    }
+
+    if (continuousActive) runContinuous();
+}
+
+function startContinuous() {
+    continuousActive = true;
+    voteBuffer.length = 0;
+    btnContinuous.textContent = '連続検知を停止';
+    btnContinuous.classList.add('active');
+    btnCapture.disabled = true;
+    guideBox.classList.add('scanning');
+    guideText.classList.add('scanning');
+    guideText.textContent = 'スキャン中...';
+    resultBox.classList.remove('show');
+    statusEl.innerHTML = '<span class="spinner"></span>スキャン中...';
+    runContinuous();
+}
+
+function stopContinuous() {
+    continuousActive = false;
+    btnContinuous.textContent = '連続検知モード';
+    btnContinuous.classList.remove('active');
+    btnCapture.disabled = false;
+    guideBox.classList.remove('scanning');
+    guideText.classList.remove('scanning');
+    guideText.textContent = 'コードをここに合わせてください';
+    statusEl.textContent = 'コードを枠内に合わせて撮影ボタンを押してください';
+}
+
+btnContinuous.addEventListener('click', () => {
+    continuousActive ? stopContinuous() : startContinuous();
+});
+
+// ── Reset ─────────────────────────────────────────────────────────────────────
+btnReset.addEventListener('click', () => {
+    stopContinuous();
+    resultBox.classList.remove('show');
+    statusEl.textContent = 'コードを枠内に合わせて撮影ボタンを押してください';
+});
+
+btnSave.addEventListener('click', () => {
+    const val = getFormattedCode();
+    if (!val) return;
+    addToHistory(val);
+    btnSave.textContent = '保存済み ✓';
+    setTimeout(() => { btnSave.textContent = '保存'; }, 1500);
+});
+
+btnCopyAll.addEventListener('click', async () => {
+    if (!detectedCodes.length) return;
+    const text = detectedCodes.map(e => e.code).join('\n');
+    try {
+        await navigator.clipboard.writeText(text);
+        btnCopyAll.textContent = 'コピー済み ✓';
+        setTimeout(() => { btnCopyAll.textContent = '全コピー'; }, 1500);
+    } catch { /* ignore */ }
+});
+
+btnClearHistory.addEventListener('click', () => {
+    detectedCodes.length = 0;
+    historyList.innerHTML = '';
+    historyCount.textContent = '0件検知';
+    historyBox.classList.remove('show');
+});
+
+btnCapture.addEventListener('click', capture);
+startCamera();
+</script>
+
+</body>
+</html>
