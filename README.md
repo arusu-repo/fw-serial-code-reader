@@ -3,6 +3,9 @@
 
 カメラでシリアルコードを読み取るWebアプリです。バックエンド不要・HTMLファイル単体で動作します。
 
+ページはこちら
+https://arusu-repo.github.io/fw-serial-code-reader/
+
 ## 対象コード形式
 
 英数字16文字（4文字×4グループ）
